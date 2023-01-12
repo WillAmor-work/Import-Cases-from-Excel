@@ -40,3 +40,24 @@ AS
    SELECT SUBSTRING(@String,1,LEN(@String)) 
    RETURN 
   END 
+
+--Prefer to use recursion
+declare @str nvarchar(max) = 'test, basicthis, basicout', @del nvarchar(max) = ', basic', @delngt int 
+select @delngt = datalength(@del)/2
+
+
+;WITH tmp(Result, String) AS
+	(	
+		SELECT 
+			LEFT(@str, CHARINDEX(@del, @str+@del) - 1),
+			STUFF(@str, 1, CHARINDEX(@del, @str+@del) + @delngt-1,'')
+		
+		UNION ALL
+
+		SELECT 
+			LEFT(String, CHARINDEX(@del, String+@del) - 1),
+			STUFF(String, 1, CHARINDEX(@del, String+@del) + @delngt-1,'')
+		FROM tmp
+		WHERE String > ''
+	)
+select Result from tmp

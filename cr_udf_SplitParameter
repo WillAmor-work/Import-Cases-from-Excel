@@ -1,0 +1,42 @@
+USE [Inpro]
+GO
+/****** Object:  UserDefinedFunction [dbo].[cr_udf_SplitParameter]    Script Date: 12/01/2023 10:57:11 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+/*******************************************************************************
+Splitting Reporting Services multi-value parameters using a SQL function
+PSD 30/07/13
+Example of how to use:-
+WHERE NAMECODE IN (SELECT Result FROM dbo.cr_udf_SplitParameter(@Parameter,','))   
+********************************************************************************/
+
+ALTER FUNCTION [dbo].[cr_udf_SplitParameter] 
+( 
+
+--The actual multi-value parameter from reporting services  
+@String NVARCHAR(max), 
+
+--The separator that will is used to delimit each new value in the string
+ @Seperator NVARCHAR(1) 
+) 
+RETURNS @cr_Table TABLE(Result NVARCHAR(max)) 
+AS 
+  BEGIN
+   --Loop through the string and insert each section into the return table of the table valued function
+   WHILE CHARINDEX(@Seperator,@String) <> 0 
+    BEGIN 
+    --Insert the value into the return table of the table valued function
+    INSERT INTO @cr_Table (Result) 
+    SELECT SUBSTRING(@String,1,CHARINDEX(@Seperator,@String) - 1) 
+    --Remove the inserted string from the original string 
+    SET @String = RIGHT(@String, LEN(@String) - CHARINDEX(@Seperator,@String)) 
+    END 
+   --Insert the last value in the string into the return table of the table valued function 
+   INSERT INTO @cr_Table (Result) 
+   SELECT SUBSTRING(@String,1,LEN(@String)) 
+   RETURN 
+  END 

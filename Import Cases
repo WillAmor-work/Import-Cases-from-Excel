@@ -1,0 +1,292 @@
+declare 
+	@table nvarchar(max) = 'inproreportdep.dbo.wda_testImport$', 
+	@fr int = 1,	--From Row
+	@tr int = 1	--To Row
+
+Declare
+	@casetype nvarchar(1) = 'A',
+	@propertytype nvarchar(1) = 'T',
+	@category nvarchar(1) = 'N',
+	@emp nvarchar(3) = 'LFE',
+	@sig nvarchar(3) = 'JMD',
+	@client nvarchar(10) = 'W1297800',
+	@status int = NULL
+
+
+--EXEC Prepare Table to get ##import
+exec [wda_PrepareImportTable] 
+	@table = @table,
+	@casetype = @casetype,
+	@propertytype = @propertytype,
+	@category = @category,
+	@emp = @emp,
+	@sig = @sig,
+	@client = @client,
+	@status = @status
+--select * from ##import
+
+IF OBJECT_ID('tempdb..##import') IS NOT NULL
+BEGIN
+	--select * from ##import
+
+	declare @user nvarchar(max) = '631'
+
+	DECLARE @sql nvarchar(max)
+
+	IF @fr is NULL set @fr = 1
+	IF @tr is NULL set @tr = (SELECT MAX(rowno) FROM ##import)
+	declare 
+		--@noRows int = (SELECT MAX(rowno) FROM ##import),
+		@iRow int,
+		@noCols int = (SELECT MAX(column_id) FROM  tempdb.Sys.Columns WHERE Object_ID = Object_ID('tempdb..##import')), 
+		@iCol int 
+	
+	declare @col nvarchar(max), @sp nvarchar(max), @param nvarchar(max), @param2 nvarchar(max), @param3 nvarchar(max)
+
+	set @iRow = @fr
+	while @iRow <= @tr--@noRows
+	Begin
+		declare 
+			@sqlCase nvarchar(max) = '',
+			@sqlClass nvarchar(max) = '',
+			@sqlName nvarchar(max) = '',
+			@sqlNumber nvarchar(max) = '',
+			@sqlEvent nvarchar(max) = ''
+
+		set @iCol = 1
+		while @iCol < @noCols --exclude rowno
+		begin
+			; with cte as (
+				select name, ROW_NUMBER()over(order by name) as rno 
+				FROM tempdb.Sys.Columns 
+				WHERE Object_ID = Object_ID('tempdb..##import') 
+				AND name != 'rowno'
+			)
+			select @col = name from cte where rno = @iCol
+	
+			select @sp = [1], @param = [2], @param2 = [3], @param3 = [4]
+				from (
+					SELECT Result, ROW_NUMBER()over(order by (SELECT NULL)) as rowno
+					FROM dbo.cr_udf_SplitParameter(@col,'_')
+				) a
+				PIVOT (
+					MIN(Result)
+					for rowno in ([1], [2], [3], [4])
+				) pvt
+			set @col = '['+@col+']'
+			if @sp = 'Case'
+			begin
+				set @sqlCase += N'declare @'+@param+' nvarchar(max) = (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+')
+				'
+			end
+
+			if @sp = 'Class'
+			begin
+				set @sqlClass += N'declare @'+@param+' nvarchar(max) = (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+')
+				'
+			end
+
+			if @sp = 'Name'
+			begin
+				IF @param2 = 'Reference'
+				begin
+					set @sqlName += N'declare @u'+@param+'nametype nvarchar(max) = '+[dbo].[fn_WrapQuotes](@param,0,0)+'
+					declare @u'+@param+'nameno nvarchar(max) = (select nameno from casename where caseid = @caseid and nametype = '+[dbo].[fn_WrapQuotes](@param,0,0)+' and sequence = 0)
+					declare @u'+@param+'ref nvarchar(max) = (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+')
+
+					EXEC [dbo].[cs_UpdateCaseName]
+						@pnUserIdentityId = '+@user+',
+						@psCaseKey = @caseid,
+						@psNameTypeKey =  @u'+@param+'nametype,
+						@pnNameSequence = 0,
+						@psReferenceNo = @u'+@param+'ref,
+						@psNameKey = @u'+@param+'nameno,
+						@psOriginalNameKey = NULL,		
+						@psOriginalNameTypeKey = NULL
+					'
+				end
+				ELSE
+				begin
+					If @param = 'O' AND @param2 = 'Name'
+					begin
+						set @sql = N'
+						If not exists (select nameno from name where name = (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+') and namecode is null)
+						BEGIN
+							declare @nameno int
+							declare @name nvarchar(max) = (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+')
+
+							EXEC [dbo].[na_InsertName]
+							@pnUserIdentityId = '+@user+',
+							@psName = @name,
+							@pnEntityType = 1,
+							@pnNameUsedAs = 3,
+							@psNameKey = @nameno OUTPUT
+
+							EXEC [dbo].[naw_InsertNameTypeClassification]
+							@pnUserIdentityId = '+@user+',
+							@pnNameKey = @nameno,
+							@psNameTypeKey = ''~~~''
+						END
+						'
+						exec (@sql)
+						set @sqlName += N'
+						declare @nameno int = (select  top 1 nameno from name where name = (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+') and namecode is null)
+						EXEC [dbo].[cs_InsertCaseName] 
+						@pnUserIdentityId = '+@user+',
+						@psCaseKey = @caseid,
+						@psNameTypeKey =  ''O'',
+						@psNameKey = @nameno
+						'
+					end
+					Else
+					Begin
+						set @sqlName += N'declare @'+@param+'nametype nvarchar(max) = '+[dbo].[fn_WrapQuotes](@param,0,0)+'
+						declare @'+@param+'nameno nvarchar(max) = (select nameno from name where '+@param2+' = (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+'))
+			
+						EXEC [dbo].[cs_InsertCaseName] 
+							@pnUserIdentityId = '+@user+',
+							@psCaseKey = @caseid,
+							@psNameTypeKey =  @'+@param+'nametype,
+							@psNameKey = @'+@param+'nameno
+						'
+					End
+				end
+			end
+
+			if @sp = 'Number'
+			begin
+				set @sqlNumber += N'declare @'+@param+'no nvarchar(max) = (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+')
+
+				EXEC [dbo].[cs_MaintainOfficialNumber]
+				@pnUserIdentityId = '+@user+',
+				@pnCaseKey = @caseid,
+				@psNumberTypeKey = '+[dbo].[fn_WrapQuotes](@param,0,0)+',
+				@psOfficialNumber = @'+@param+'no
+				'
+			end
+
+			if @sp = 'Event'
+			begin
+				declare @event nvarchar(max) = replace(@param,'-','m')
+				set @sqlEvent += N'if (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+') is not null
+				begin
+				declare @'+@event+'cycle INT = (select isNULL(MAX(cycle),1) from caseevent where caseid = @caseid and eventno = '+@param+')
+				declare @'+@event+'date DATE = (select '+@col+' from ##import where rowno = '+convert(nvarchar(max),@iRow)+') 
+		
+				EXEC [dbo].[cs_InsertCaseEvent]
+				@pnUserIdentityId = '+@user+',
+				@pnCaseKey = @caseid,
+				@pnEventKey = '+@param+',
+				@pnCycle = @'+@event+'cycle,
+				'+ CASE (@param2)
+					WHEN 'Event' Then '@pdtEventDate'
+					WHEN 'Due' Then '@pdtEventDueDate'
+				END + ' = @'+@event+'date
+
+				EXEC [dbo].[ip_InsertPolicing]
+				@pnUserIdentityId = '+@user+',
+				@psCaseKey = @caseid,
+				@pnTypeOfRequest = 1,
+				@psAction = '+isnull([dbo].[fn_WrapQuotes](@param3,0,0),'NULL')+'
+				end
+				'
+			end
+			set @iCol += 1
+		end
+
+		set @sqlName += N'
+		
+		EXEC [dbo].[cs_GenerateCaseName]
+		@pnUserIdentityId = '+@user+',
+		@pnCaseKey = @caseid,
+		@pbCalledFromCentura = 1
+		'
+		set @sqlCase += N'
+		declare @caseid int
+		EXEC [dbo].[cs_InsertCase]
+		@pnUserIdentityId = '+@user+',
+		@psCaseTypeKey = @casetype,
+		@psCountryKey = @country,
+		@psPropertyTypeKey = @propertytype,
+		@psCaseCategoryKey = @category, 
+		@psSubTypeKey = @subtype, 
+		@psShortTitle = @title, 
+		@pbReportToThirdParty = @reporttocpa, 
+		@psTypeOfMarkKey = @marktype,
+		@psApplicationBasisKey = @basis, 
+		'
+		----possibly use--
+		--set @sqlCase += N'
+		--@psStem = NULL,
+		--@pnOfficeKey = NULL,
+		--@psCaseFamilyReference = NULL,
+		--@pnNoOfClaims = NULL,
+		--@psEntitySizeKey = NULL,
+		--@psStopPayReasonKey = NULL,
+		--@pdtInstructionsReceivedDate = NULL,
+		--'
+		set @sqlCase += N'
+		@psCaseKey = @caseid OUTPUT
+
+		declare @irn nvarchar(max)
+		EXEC [dbo].[cs_ApplyGeneratedReference]
+		@pnUserIdentityId = '+@user+',
+		@pnCaseKey = @caseid,
+		@psCaseReference = @irn OUTPUT
+		
+		EXEC [dbo].[cs_UpdateCase]
+		---------------------
+		@pnUserIdentityId = '+@user+',
+		@psCaseKey = @caseid,
+		@psStatusKey = @status,
+		@pbStatusKeyModified = 1
+		'
+		set @sqlClass += N'
+		declare @zClass int = (select len(@Classes)-len(replace(@Classes,Char(44),''''))+1)
+			, @iClass int = 1
+			, @class nvarchar(3)
+			, @good nvarchar(max)
+
+		while @iClass <= @zClass
+		begin
+			;with a as (
+				SELECT *
+				FROM (
+					SELECT Result as [Class], ROW_NUMBER()over(order by (SELECT NULL)) as rowno
+					FROM dbo.cr_udf_SplitParameter(@Classes,Char(44)) 
+				) class
+				LEFT JOIN (
+					SELECT Result as [Goods], ROW_NUMBER()over(order by (SELECT NULL)) as rowno2
+					FROM dbo.cr_udf_SplitParameter(@Goods,Char(46))
+					where Result != ''''
+				) goods on goods.rowno2 = class.rowno
+			)
+			select @class = Class, @good = Goods 
+			from a where rowno = @iClass
+
+			exec [dbo].[cs_InsertClasses]
+			@pnUserIdentityId = '+@user+',
+			@psCaseKey = @caseid,
+			@psTrademarkClassKey = @class,
+			@psTrademarkClassText = @good 
+	
+			set @iClass += 1
+		end
+		'
+		set @sql = @sqlCase + @sqlClass + @sqlName + @sqlNumber +@sqlEvent
+		set @sql += N'
+		EXEC [dbo].[ip_InsertPolicing]
+		@pnUserIdentityId = '+@user+',
+		@psCaseKey = @caseid,
+		@pnTypeOfRequest = 1,
+		@psAction = ''as''
+
+		SELECT @irn
+		'
+		declare @temp Table ([outputs] nvarchar(max))
+		insert @temp exec (@sql)
+		set @iRow += 1
+		
+	End --iRow while loop
+	select * from @temp where outputs like '[PDT]%'
+END --If ##import exists

@@ -1,0 +1,163 @@
+/*******************
+	Prepare Table
+*******************/
+USE [InproReportDB]
+GO
+/****** Object:  StoredProcedure [dbo].[wda_Import_PrepTempTable]    Script Date: 03/12/2021 14:27:00 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE 
+[dbo].[wda_PrepareImportTable] --*mandatory (if not in table already)
+	@table nvarchar(max),
+	 --Case defaults
+	@casetype	nvarchar(max)	= NULL, --*
+	@propertytype	nvarchar(max)	= NULL, --*
+	@country	nvarchar(max)	= NULL, --*
+	@category	nvarchar(max)	= NULL, --*
+	@subtype	nvarchar(max)	= NULL, 
+	@status		nvarchar(max)	= NULL,
+	@reporttocpa	nvarchar(max)	= NULL,
+	@basis		nvarchar(max)	= NULL, --*
+	@title		nvarchar(max)	= NULL,
+	@marktype	nvarchar(max)	= NULL,--'5102'--set all to Word Mark
+	--Name defaults
+	@emp	nvarchar(max)	= NULL, --*
+	@sa		nvarchar(max)	= NULL,
+	@sig	nvarchar(max)	= NULL, --*
+	@client nvarchar(max)	= NULL, --*
+	@owner	nvarchar(max)	= NULL, --*
+	--Event defaults
+	@startpay	nvarchar(max)	= NULL,
+	@takeover	nvarchar(max)	= NULL --should this be mandatory??
+AS 
+SET NOCOUNT ON
+/*****************************************************************************************
+Author:			WDA
+Date:			2021-12-03
+Description:	Use to prepare table data for importing
+		
+Exec:			[wda_PrepareImportTable] 'wda_testImport$','a'			
+*****************************************************************************************/
+BEGIN
+
+	DECLARE @sql nvarchar(max)
+	
+	--Create Global temp table
+	set @sql = N'select * into ##import from '+@table 
+	if object_id('tempdb..##import') is not null drop table ##import
+	exec (@sql)
+
+	--Add default params and corresponding column name to a temp table
+	declare @columns_table table ([id] INT IDENTITY(1,1), [name] nvarchar(max), [val] nvarchar(max))
+	insert into @columns_table
+	values 
+		('Case_CaseType', @casetype), 
+		('Case_PropertyType', @propertytype), 
+		('Case_Country', @country),
+		('Case_Category', @category),
+		('Case_SubType', @subtype),
+		('Case_Status', @status),
+		('Case_ReportToCpa', @reporttocpa),
+		('Case_Basis', @basis),
+		('Case_Title', @title),
+		('Case_MarkType', @marktype),
+		('Name_EMP_Namecode', @emp),
+		('Name_SIG_Namecode', @sig),
+		('Name_I_Namecode', @client),
+		('Name_O_Name', @owner),
+		('Event_-11858_Event', @startpay),
+		('Event_-400_Event', @takeover)
+	IF @sa IS NOT NULL insert into @columns_table values ('Name_SA_Namecode', @sa)
+	--If column not in Global temp then add it with param value
+	set @sql = ''
+	declare @y int = 1, @z int = (select MAX([id]) from @columns_table)
+	while @y <= @z
+	begin
+		set @sql += CASE WHEN (select [name] from @columns_table where [id] = @y) not in (select name FROM tempdb.Sys.Columns WHERE Object_ID = Object_ID('tempdb..##import'))
+			Then N'	
+			Alter table ##import
+			ADD ['+(select [name] from @columns_table where [id] = @y)+'] nvarchar(max)
+			DEFAULT '+isNULL([dbo].[fn_WrapQuotes]((select [val] from @columns_table where [id] = @y),0,0),'NULL')+'
+			WITH VALUES
+			'
+			Else '' 
+		End
+		set @y += 1
+	end
+	--select @sql
+	exec (@sql)
+
+	Alter table ##import
+	ADD rowno INT IDENTITY(1,1) NOT NULL
+
+	
+	if 'Class_Classes' in (select name FROM tempdb.Sys.Columns WHERE Object_ID = Object_ID('tempdb..##import'))
+	BEGIN
+		--UPDATE CLASSES to correct format--
+		UPDATE ##import -- Remove Spaces
+		SET [Class_Classes] = SUBSTRING(
+			(
+				select ','+
+					CASE LEN(ltrim(rtrim(result))) 
+						WHEN 1 Then '0'+ltrim(rtrim(result))
+						ELSE ltrim(rtrim(result))
+					END
+				from dbo.cr_udf_SplitParameter([Class_Classes],',')
+				where ltrim(rtrim(result)) != ''
+				for XML path ('')
+			), 2, 1000000)
+		----
+	END
+
+
+	declare 
+		@noCols int = (SELECT MAX(column_id) FROM  tempdb.Sys.Columns WHERE Object_ID = Object_ID('tempdb..##import')), 
+		@iCol int = 1,
+		@col nvarchar(max)
+	while @iCol < @noCols --exclude [rowno]
+	begin
+		select @col = name FROM tempdb.Sys.Columns WHERE Object_ID = Object_ID('tempdb..##import') and column_id = @iCol
+		set @col = '['+@col+']'
+		declare 
+			@replaceStart nvarchar(max) = 'LTRIM(RTRIM(REPLACE(REPLACE(',
+			@replaceEnd nvarchar(max) = ',CHAR(13),''''),CHAR(10),'''')))'
+
+		set @sql = 'UPDATE ##import SET '+@col+' = '+@replaceStart+@col+@replaceEnd+'
+					UPDATE ##import SET '+@col+' = NULL WHERE LEN('+@col+') = 0'
+		exec (@sql)
+	
+		set @iCol += 1
+	end
+
+	--Check if required Case Details have been included in table
+	IF EXISTS(
+		SELECT * 
+		FROM ##import 
+		WHERE Case_CaseType IS NULL
+		OR Case_PropertyType IS NULL
+		OR Case_Country IS NULL
+		OR Case_Category IS NULL
+		OR Case_Basis IS NULL
+		OR Name_EMP_Namecode IS NULL
+		OR Name_SIG_Namecode IS NULL
+		OR Name_I_Namecode IS NULL
+		OR Name_O_Name IS NULL
+	) 
+	BEGIN 
+		DROP TABLE ##Import 
+		RAISERROR (N'
+ERROR CREATING ##import TABLE
+%s
+%s.'		, -- Message text.  
+           10, -- Severity,  
+           1, -- State,  
+           N'Check all required case details have been supplied', -- First argument.  
+           N'see sp [dbo].[wda_PrepareImportTable] for more info'); -- Second argument.  
+			-- The message text returned is: This is message number 5.  
+ 
+	END
+
+END
